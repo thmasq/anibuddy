@@ -1,4 +1,5 @@
 use anyhow::Result;
+use include_dir::Dir;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,31 +11,40 @@ use winit::window::{Window, WindowAttributes, WindowId};
 use crate::image_loader::ImageSequence;
 use crate::renderer::Renderer;
 
-pub struct OverlayApplication {
+pub struct OverlayApplication<'a> {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     image_sequence: Option<ImageSequence>,
-    image_directory: PathBuf,
+    image_directory: Option<PathBuf>,
+    embedded_dir: Option<&'a Dir<'a>>,
     last_frame_time: Instant,
     frame_interval: Duration,
 }
 
-impl OverlayApplication {
-    pub fn new(image_directory: PathBuf) -> Self {
+impl OverlayApplication<'static> {
+    pub fn new_embedded(dir: &'static Dir, frame_interval: Duration) -> Self {
         Self {
             window: None,
             renderer: None,
             image_sequence: None,
-            image_directory,
+            image_directory: None,
+            embedded_dir: Some(dir),
             last_frame_time: Instant::now(),
-            frame_interval: Duration::from_millis(33), // ~30 FPS
+            frame_interval,
         }
     }
 
     pub fn run(&mut self) -> Result<()> {
         let event_loop = EventLoop::new()?;
 
-        self.image_sequence = Some(ImageSequence::load(&self.image_directory)?);
+        // Load the image sequence based on which constructor was used
+        self.image_sequence = if let Some(dir) = self.image_directory.as_ref() {
+            Some(ImageSequence::load(dir)?)
+        } else if let Some(dir) = self.embedded_dir {
+            Some(ImageSequence::load_embedded(&dir)?)
+        } else {
+            return Err(anyhow::format_err!("No image source specified"));
+        };
 
         if let Some(sequence) = &self.image_sequence {
             log::info!("Loaded {} images in sequence", sequence.count());
@@ -74,7 +84,7 @@ impl OverlayApplication {
     }
 }
 
-impl ApplicationHandler for OverlayApplication {
+impl ApplicationHandler for OverlayApplication<'static> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let (width, height) = if let Some(sequence) = &self.image_sequence {
             if let Some(image) = sequence.current_image() {
