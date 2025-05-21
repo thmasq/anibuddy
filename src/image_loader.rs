@@ -57,7 +57,7 @@ impl ImageSequence {
 
         let mut images = Vec::with_capacity(image_files.len());
         for file in image_files {
-            log::info!("Loading embedded file: {}", file.path().display());
+            log::debug!("Loading embedded file: {}", file.path().display());
             let data = file.contents();
             let img = image::load_from_memory_with_format(data, ImageFormat::Png)?.to_rgba8();
             images.push(img);
@@ -73,11 +73,11 @@ impl ImageSequence {
         self.images.get(self.current_index)
     }
 
-    pub fn advance(&mut self) {
-        self.current_index = (self.current_index + 1) % self.images.len();
-    }
-
     pub fn count(&self) -> usize {
         self.images.len()
+    }
+
+    pub fn get_all_images(&self) -> &[RgbaImage] {
+        &self.images
     }
 }

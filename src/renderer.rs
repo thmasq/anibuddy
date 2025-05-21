@@ -63,8 +63,8 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
-    texture: Option<wgpu::Texture>,
-    texture_bind_group: Option<wgpu::BindGroup>,
+    texture_bind_groups: Vec<wgpu::BindGroup>,
+    current_texture_index: usize,
     config: wgpu::SurfaceConfiguration,
     dimensions_buffer: wgpu::Buffer,
     current_dimensions: Dimensions,
@@ -239,8 +239,8 @@ impl Renderer {
             surface,
             pipeline,
             bind_group_layout,
-            texture: None,
-            texture_bind_group: None,
+            texture_bind_groups: Vec::new(),
+            current_texture_index: 0,
             config,
             dimensions_buffer,
             current_dimensions,
@@ -270,12 +270,20 @@ impl Renderer {
         log::info!("Resized to {}x{}", width, height);
     }
 
-    pub fn load_image(&mut self, image: &RgbaImage) {
-        let dimensions = image.dimensions();
+    // New method to preload all images at once
+    pub fn preload_images(&mut self, images: &[RgbaImage]) {
+        if images.is_empty() {
+            log::warn!("No images to preload");
+            return;
+        }
 
-        // Store image dimensions
-        self.current_dimensions.image_width = dimensions.0 as f32;
-        self.current_dimensions.image_height = dimensions.1 as f32;
+        // Clear any existing textures
+        self.texture_bind_groups.clear();
+
+        // Use first image dimensions for the window
+        let first_dims = images[0].dimensions();
+        self.current_dimensions.image_width = first_dims.0 as f32;
+        self.current_dimensions.image_height = first_dims.1 as f32;
 
         // Update the dimensions buffer
         self.queue.write_buffer(
@@ -284,40 +292,7 @@ impl Renderer {
             bytemuck::cast_slice(&[self.current_dimensions]),
         );
 
-        let texture_size = wgpu::Extent3d {
-            width: dimensions.0,
-            height: dimensions.1,
-            depth_or_array_layers: 1,
-        };
-
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Image Texture"),
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            image,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * dimensions.0),
-                rows_per_image: Some(dimensions.1),
-            },
-            texture_size,
-        );
-
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Create a reusable sampler
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -328,33 +303,79 @@ impl Renderer {
             ..Default::default()
         });
 
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Texture Bind Group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.dimensions_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        log::info!("Preloading {} images to GPU memory", images.len());
 
-        self.texture = Some(texture);
-        self.texture_bind_group = Some(bind_group);
+        for (i, image) in images.iter().enumerate() {
+            let dimensions = image.dimensions();
 
+            let texture_size = wgpu::Extent3d {
+                width: dimensions.0,
+                height: dimensions.1,
+                depth_or_array_layers: 1,
+            };
+
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("Image Texture {}", i)),
+                size: texture_size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                image,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * dimensions.0),
+                    rows_per_image: Some(dimensions.1),
+                },
+                texture_size,
+            );
+
+            let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("Texture Bind Group {}", i)),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.dimensions_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+            self.texture_bind_groups.push(bind_group);
+        }
+
+        self.current_texture_index = 0;
         log::info!(
-            "Loaded image with dimensions: {}x{}",
-            dimensions.0,
-            dimensions.1
+            "Preloaded {} images to GPU memory",
+            self.texture_bind_groups.len()
         );
+    }
+
+    pub fn set_current_texture_index(&mut self, index: usize) {
+        if !self.texture_bind_groups.is_empty() {
+            self.current_texture_index = index % self.texture_bind_groups.len();
+        }
     }
 
     pub fn render(&mut self) -> Result<()> {
@@ -369,7 +390,10 @@ impl Renderer {
                 label: Some("Render Encoder"),
             });
 
-        if let Some(bind_group) = &self.texture_bind_group {
+        if !self.texture_bind_groups.is_empty() {
+            // Get the bind group for the current texture index
+            let bind_group = &self.texture_bind_groups[self.current_texture_index];
+
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

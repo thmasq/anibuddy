@@ -19,6 +19,8 @@ pub struct OverlayApplication<'a> {
     embedded_dir: Option<&'a Dir<'a>>,
     last_frame_time: Instant,
     frame_interval: Duration,
+    current_frame_index: usize,
+    frame_count: usize,
 }
 
 impl OverlayApplication<'static> {
@@ -31,6 +33,8 @@ impl OverlayApplication<'static> {
             embedded_dir: Some(dir),
             last_frame_time: Instant::now(),
             frame_interval,
+            current_frame_index: 0,
+            frame_count: 0,
         }
     }
 
@@ -47,7 +51,8 @@ impl OverlayApplication<'static> {
         };
 
         if let Some(sequence) = &self.image_sequence {
-            log::info!("Loaded {} images in sequence", sequence.count());
+            self.frame_count = sequence.count();
+            log::info!("Loaded {} images in sequence", self.frame_count);
         } else {
             log::error!("Failed to load image sequence");
             return Ok(());
@@ -63,13 +68,11 @@ impl OverlayApplication<'static> {
         if now.duration_since(self.last_frame_time) >= self.frame_interval {
             self.last_frame_time = now;
 
-            if let Some(sequence) = &mut self.image_sequence {
-                sequence.advance();
+            if self.frame_count > 0 {
+                self.current_frame_index = (self.current_frame_index + 1) % self.frame_count;
 
-                if let (Some(renderer), Some(image)) =
-                    (&mut self.renderer, sequence.current_image())
-                {
-                    renderer.load_image(image);
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_current_texture_index(self.current_frame_index);
                 }
             }
         }
@@ -118,16 +121,16 @@ impl ApplicationHandler for OverlayApplication<'static> {
 
                 pollster::block_on(async {
                     match Renderer::new(window_arc).await {
-                        Ok(renderer) => {
-                            self.renderer = Some(renderer);
+                        Ok(mut renderer) => {
+                            if let Some(sequence) = &self.image_sequence {
+                                let all_images = sequence.get_all_images();
 
-                            if let (Some(renderer), Some(sequence)) =
-                                (&mut self.renderer, &self.image_sequence)
-                            {
-                                if let Some(image) = sequence.current_image() {
-                                    renderer.load_image(image);
-                                }
+                                renderer.preload_images(&all_images);
+
+                                log::info!("Preloaded {} images to GPU memory", all_images.len());
                             }
+
+                            self.renderer = Some(renderer);
                         }
                         Err(err) => {
                             log::error!("Failed to create renderer: {}", err);
