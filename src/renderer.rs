@@ -1,6 +1,8 @@
 use anyhow::Result;
+use bytemuck::{Pod, Zeroable};
 use image::RgbaImage;
 use std::sync::Arc;
+use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 const VERTEX_SHADER: &str = r#"
@@ -30,19 +32,30 @@ const FRAGMENT_SHADER: &str = r#"
 var t_diffuse: texture_2d<f32>;
 @group(0) @binding(1)
 var s_diffuse: sampler;
+@group(0) @binding(2)
+var<uniform> dimensions: vec4<f32>; // window_width, window_height, image_width, image_height
 
 @fragment
 fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    // Calculate texture coordinates
+    // Calculate texture coordinates based on actual dimensions
     let tex_coords = vec2<f32>(
-        pos.x / 1920.0, // Window width
-        1.0 - pos.y / 1080.0  // Window height, flipped Y
+        pos.x / dimensions.x,
+        pos.y / dimensions.y
     );
     
     // Sample the texture
     return textureSample(t_diffuse, s_diffuse, tex_coords);
 }
 "#;
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct Dimensions {
+    window_width: f32,
+    window_height: f32,
+    image_width: f32,
+    image_height: f32,
+}
 
 pub struct Renderer {
     device: wgpu::Device,
@@ -53,6 +66,8 @@ pub struct Renderer {
     texture: Option<wgpu::Texture>,
     texture_bind_group: Option<wgpu::BindGroup>,
     config: wgpu::SurfaceConfiguration,
+    dimensions_buffer: wgpu::Buffer,
+    current_dimensions: Dimensions,
 }
 
 impl Renderer {
@@ -106,6 +121,21 @@ impl Renderer {
 
         surface.configure(&device, &config);
 
+        // Initialize the dimensions
+        let current_dimensions = Dimensions {
+            window_width: size.width as f32,
+            window_height: size.height as f32,
+            image_width: size.width as f32,
+            image_height: size.height as f32,
+        };
+
+        // Create dimensions buffer
+        let dimensions_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Dimensions Buffer"),
+            contents: bytemuck::cast_slice(&[current_dimensions]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Texture Bind Group Layout"),
             entries: &[
@@ -123,6 +153,16 @@ impl Renderer {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -202,6 +242,8 @@ impl Renderer {
             texture: None,
             texture_bind_group: None,
             config,
+            dimensions_buffer,
+            current_dimensions,
         })
     }
 
@@ -213,10 +255,34 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+
+        // Update dimensions
+        self.current_dimensions.window_width = width as f32;
+        self.current_dimensions.window_height = height as f32;
+
+        // Update the buffer
+        self.queue.write_buffer(
+            &self.dimensions_buffer,
+            0,
+            bytemuck::cast_slice(&[self.current_dimensions]),
+        );
+
+        log::info!("Resized to {}x{}", width, height);
     }
 
     pub fn load_image(&mut self, image: &RgbaImage) {
         let dimensions = image.dimensions();
+
+        // Store image dimensions
+        self.current_dimensions.image_width = dimensions.0 as f32;
+        self.current_dimensions.image_height = dimensions.1 as f32;
+
+        // Update the dimensions buffer
+        self.queue.write_buffer(
+            &self.dimensions_buffer,
+            0,
+            bytemuck::cast_slice(&[self.current_dimensions]),
+        );
 
         let texture_size = wgpu::Extent3d {
             width: dimensions.0,
@@ -274,11 +340,21 @@ impl Renderer {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.dimensions_buffer.as_entire_binding(),
+                },
             ],
         });
 
         self.texture = Some(texture);
         self.texture_bind_group = Some(bind_group);
+
+        log::info!(
+            "Loaded image with dimensions: {}x{}",
+            dimensions.0,
+            dimensions.1
+        );
     }
 
     pub fn render(&mut self) -> Result<()> {

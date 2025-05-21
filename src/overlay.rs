@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalSize;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -75,11 +76,30 @@ impl OverlayApplication {
 
 impl ApplicationHandler for OverlayApplication {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let (width, height) = if let Some(sequence) = &self.image_sequence {
+            if let Some(image) = sequence.current_image() {
+                let dimensions = image.dimensions();
+                log::info!(
+                    "Using image dimensions for window: {}x{}",
+                    dimensions.0,
+                    dimensions.1
+                );
+                (dimensions.0, dimensions.1)
+            } else {
+                log::info!("No image found, using default dimensions");
+                (800, 600)
+            }
+        } else {
+            log::info!("No image sequence found, using default dimensions");
+            (800, 600)
+        };
+
         let window_attributes = WindowAttributes::default()
             .with_title("PNG Overlay")
             .with_transparent(true)
             .with_decorations(false)
-            .with_resizable(false);
+            .with_resizable(false)
+            .with_inner_size(PhysicalSize::new(width, height));
 
         match event_loop.create_window(window_attributes) {
             Ok(window) => {
