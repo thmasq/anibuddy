@@ -1,9 +1,8 @@
 use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
 use image::RgbaImage;
-use std::sync::Arc;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use wgpu::util::DeviceExt;
-use winit::window::Window;
 
 const VERTEX_SHADER: &str = r#"
 @vertex
@@ -71,13 +70,22 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<Window>) -> Result<Self> {
+    pub async fn new_from_raw_handle(
+        raw_display_handle: RawDisplayHandle,
+        raw_window_handle: RawWindowHandle,
+    ) -> Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
 
-        let surface = instance.create_surface(window.clone())?;
+        // Create surface from raw handles
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle,
+                raw_window_handle,
+            })?
+        };
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -98,9 +106,8 @@ impl Renderer {
             })
             .await?;
 
-        let size = window.inner_size();
+        // Get surface capabilities
         let surface_caps = surface.get_capabilities(&adapter);
-
         let surface_format = surface_caps
             .formats
             .iter()
@@ -108,12 +115,16 @@ impl Renderer {
             .copied()
             .unwrap_or(surface_caps.formats[0]);
 
+        // Default size, will be updated when configured
+        let width = 256;
+        let height = 256;
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: wgpu::PresentMode::Fifo, // VSync since running on wayland
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo, // VSync for Wayland
             desired_maximum_frame_latency: 2,
             alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
             view_formats: vec![],
@@ -123,10 +134,10 @@ impl Renderer {
 
         // Initialize the dimensions
         let current_dimensions = Dimensions {
-            window_width: size.width as f32,
-            window_height: size.height as f32,
-            image_width: size.width as f32,
-            image_height: size.height as f32,
+            window_width: width as f32,
+            window_height: height as f32,
+            image_width: width as f32,
+            image_height: height as f32,
         };
 
         // Create dimensions buffer
@@ -270,7 +281,7 @@ impl Renderer {
         log::info!("Resized to {}x{}", width, height);
     }
 
-    // New method to preload all images at once
+    // Method to preload all images at once
     pub fn preload_images(&mut self, images: &[RgbaImage]) {
         if images.is_empty() {
             log::warn!("No images to preload");
