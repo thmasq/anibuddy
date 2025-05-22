@@ -1,6 +1,4 @@
 use anyhow::Result;
-use include_dir::Dir;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -8,29 +6,27 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::image_loader::ImageSequence;
+use crate::media_loader::{MediaSequence, MediaSource};
 use crate::renderer::Renderer;
 
-pub struct OverlayApplication<'a> {
+pub struct OverlayApplication {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    image_sequence: Option<ImageSequence>,
-    image_directory: Option<PathBuf>,
-    embedded_dir: Option<&'a Dir<'a>>,
+    media_sequence: Option<MediaSequence>,
+    media_source: Option<MediaSource>,
     last_frame_time: Instant,
     frame_interval: Duration,
     current_frame_index: usize,
     frame_count: usize,
 }
 
-impl OverlayApplication<'static> {
-    pub fn new_embedded(dir: &'static Dir, frame_interval: Duration) -> Self {
+impl OverlayApplication {
+    pub fn new(source: MediaSource, frame_interval: Duration) -> Self {
         Self {
             window: None,
             renderer: None,
-            image_sequence: None,
-            image_directory: None,
-            embedded_dir: Some(dir),
+            media_sequence: None,
+            media_source: Some(source),
             last_frame_time: Instant::now(),
             frame_interval,
             current_frame_index: 0,
@@ -41,20 +37,18 @@ impl OverlayApplication<'static> {
     pub fn run(&mut self) -> Result<()> {
         let event_loop = EventLoop::new()?;
 
-        // Load the image sequence based on which constructor was used
-        self.image_sequence = if let Some(dir) = self.image_directory.as_ref() {
-            Some(ImageSequence::load(dir)?)
-        } else if let Some(dir) = self.embedded_dir {
-            Some(ImageSequence::load_embedded(&dir)?)
+        // Load the media sequence
+        if let Some(source) = self.media_source.take() {
+            self.media_sequence = Some(MediaSequence::load(source)?);
         } else {
-            return Err(anyhow::format_err!("No image source specified"));
+            return Err(anyhow::format_err!("No media source specified"));
         };
 
-        if let Some(sequence) = &self.image_sequence {
+        if let Some(sequence) = &self.media_sequence {
             self.frame_count = sequence.count();
-            log::info!("Loaded {} images in sequence", self.frame_count);
+            log::info!("Loaded {} frames in sequence", self.frame_count);
         } else {
-            log::error!("Failed to load image sequence");
+            log::error!("Failed to load media sequence");
             return Ok(());
         }
 
@@ -87,9 +81,9 @@ impl OverlayApplication<'static> {
     }
 }
 
-impl ApplicationHandler for OverlayApplication<'static> {
+impl ApplicationHandler for OverlayApplication {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let (width, height) = if let Some(sequence) = &self.image_sequence {
+        let (width, height) = if let Some(sequence) = &self.media_sequence {
             if let Some(image) = sequence.current_image() {
                 let dimensions = image.dimensions();
                 log::info!(
@@ -103,7 +97,7 @@ impl ApplicationHandler for OverlayApplication<'static> {
                 (800, 600)
             }
         } else {
-            log::info!("No image sequence found, using default dimensions");
+            log::info!("No media sequence found, using default dimensions");
             (800, 600)
         };
 
@@ -122,7 +116,7 @@ impl ApplicationHandler for OverlayApplication<'static> {
                 pollster::block_on(async {
                     match Renderer::new(window_arc).await {
                         Ok(mut renderer) => {
-                            if let Some(sequence) = &self.image_sequence {
+                            if let Some(sequence) = &self.media_sequence {
                                 let all_images = sequence.get_all_images();
 
                                 renderer.preload_images(&all_images);
