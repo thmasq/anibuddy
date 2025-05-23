@@ -4,6 +4,7 @@ use image::RgbaImage;
 use std::fs::File as StdFile;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug)]
 pub enum MediaSource {
     Directory(PathBuf),
     GifFile(PathBuf),
