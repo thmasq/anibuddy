@@ -179,7 +179,6 @@ impl MediaSequence {
 
             let buffer_size = reader.output_buffer_size();
             let mut buffer = vec![0; buffer_size];
-            let mut canvas = RgbaImage::new(canvas_width, canvas_height);
 
             // Read all frames
             loop {

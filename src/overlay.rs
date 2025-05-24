@@ -18,10 +18,12 @@ pub struct OverlayApplication {
     frame_interval: Duration,
     current_frame_index: usize,
     frame_count: usize,
+    use_compression: bool,
+    frame_update_in_progress: bool,
 }
 
 impl OverlayApplication {
-    pub fn new(source: MediaSource, frame_interval: Duration) -> Self {
+    pub fn new(source: MediaSource, frame_interval: Duration, use_compression: bool) -> Self {
         Self {
             window: None,
             renderer: None,
@@ -31,6 +33,8 @@ impl OverlayApplication {
             frame_interval,
             current_frame_index: 0,
             frame_count: 0,
+            use_compression,
+            frame_update_in_progress: false,
         }
     }
 
@@ -59,14 +63,51 @@ impl OverlayApplication {
 
     fn update(&mut self) {
         let now = Instant::now();
-        if now.duration_since(self.last_frame_time) >= self.frame_interval {
+        if now.duration_since(self.last_frame_time) >= self.frame_interval
+            && !self.frame_update_in_progress
+        {
             self.last_frame_time = now;
 
             if self.frame_count > 0 {
-                self.current_frame_index = (self.current_frame_index + 1) % self.frame_count;
+                let new_frame_index = (self.current_frame_index + 1) % self.frame_count;
 
                 if let Some(renderer) = &mut self.renderer {
-                    renderer.set_current_texture_index(self.current_frame_index);
+                    self.frame_update_in_progress = true;
+
+                    // For compressed sequences, we need to handle async frame reconstruction
+                    if self.use_compression {
+                        // Create a future to update the frame
+                        let renderer_ptr = renderer as *mut Renderer;
+                        let frame_index = new_frame_index;
+
+                        // This could probably be done better
+                        // For now, we'll use pollster to block on the async operation
+                        match pollster::block_on(async {
+                            let renderer = unsafe { &mut *renderer_ptr };
+                            renderer.set_current_texture_index(frame_index).await
+                        }) {
+                            Ok(_) => {
+                                self.current_frame_index = new_frame_index;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to update compressed frame: {}", e);
+                            }
+                        }
+                    } else {
+                        // For uncompressed sequences, this is synchronous
+                        match pollster::block_on(
+                            renderer.set_current_texture_index(new_frame_index),
+                        ) {
+                            Ok(_) => {
+                                self.current_frame_index = new_frame_index;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to update frame: {}", e);
+                            }
+                        }
+                    }
+
+                    self.frame_update_in_progress = false;
                 }
             }
         }
@@ -102,7 +143,11 @@ impl ApplicationHandler for OverlayApplication {
         };
 
         let window_attributes = WindowAttributes::default()
-            .with_title("PNG Overlay")
+            .with_title(if self.use_compression {
+                "PNG Overlay (Delta Compressed)"
+            } else {
+                "PNG Overlay"
+            })
             .with_transparent(true)
             .with_decorations(false)
             .with_resizable(false)
@@ -119,9 +164,30 @@ impl ApplicationHandler for OverlayApplication {
                             if let Some(sequence) = &self.media_sequence {
                                 let all_images = sequence.get_all_images();
 
-                                renderer.preload_images(&all_images);
-
-                                log::info!("Preloaded {} images to GPU memory", all_images.len());
+                                if self.use_compression {
+                                    log::info!(
+                                        "Loading {} images with delta compression",
+                                        all_images.len()
+                                    );
+                                    match renderer.preload_images_compressed(&all_images).await {
+                                        Ok(_) => {
+                                            log::info!("Successfully loaded compressed sequence");
+                                        }
+                                        Err(e) => {
+                                            log::error!(
+                                                "Failed to load compressed sequence: {}, falling back to uncompressed",
+                                                e
+                                            );
+                                            renderer.preload_images(&all_images);
+                                        }
+                                    }
+                                } else {
+                                    log::info!(
+                                        "Loading {} images without compression",
+                                        all_images.len()
+                                    );
+                                    renderer.preload_images(&all_images);
+                                }
                             }
 
                             self.renderer = Some(renderer);

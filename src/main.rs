@@ -1,4 +1,6 @@
+// src/main.rs (updated)
 mod config;
+mod delta_compression;
 mod media_loader;
 mod overlay;
 mod renderer;
@@ -21,12 +23,12 @@ fn main() -> Result<()> {
     // Load config file
     let config = Config::load()?;
 
-    // Parse command line arguments and determine media source and fps
-    let (media_source, fps) = match args.len() {
+    // Parse command line arguments and determine media source, fps, and compression
+    let (media_source, fps, use_compression) = match args.len() {
         1 => {
             // No arguments provided - try to use default preset
             match handle_no_arguments(&config) {
-                Ok(result) => result,
+                Ok((source, fps)) => (source, fps, false), // Default to no compression
                 Err(_) => {
                     print_usage(&args[0], &config);
                     std::process::exit(1);
@@ -34,24 +36,87 @@ fn main() -> Result<()> {
             }
         }
         2 => {
-            // One argument - could be preset name or path
-            match handle_single_argument(&config, &args[1]) {
-                Ok(result) => result,
-                Err(err) => {
-                    eprintln!("Error: {}", err);
-                    std::process::exit(1);
+            // One argument - could be preset name, path, or compression flag
+            if args[1] == "--compress" || args[1] == "-c" {
+                // Compression flag with default preset
+                match handle_no_arguments(&config) {
+                    Ok((source, fps)) => (source, fps, true),
+                    Err(_) => {
+                        eprintln!("Error: No default preset configured for compression mode");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Path or preset name
+                match handle_single_argument(&config, &args[1]) {
+                    Ok((source, fps)) => (source, fps, false),
+                    Err(err) => {
+                        eprintln!("Error: {}", err);
+                        std::process::exit(1);
+                    }
                 }
             }
         }
         3 => {
-            // Two arguments - path/preset and FPS
-            let fps = parse_fps(&args[2]);
-            match handle_argument_with_fps(&config, &args[1], fps) {
-                Ok(result) => result,
-                Err(err) => {
-                    eprintln!("Error: {}", err);
-                    std::process::exit(1);
+            // Two arguments - various combinations
+            if args[1] == "--compress" || args[1] == "-c" {
+                // Compression flag + path/preset
+                match handle_single_argument(&config, &args[2]) {
+                    Ok((source, fps)) => (source, fps, true),
+                    Err(err) => {
+                        eprintln!("Error: {}", err);
+                        std::process::exit(1);
+                    }
                 }
+            } else if args[2] == "--compress" || args[2] == "-c" {
+                // Path/preset + compression flag
+                match handle_single_argument(&config, &args[1]) {
+                    Ok((source, fps)) => (source, fps, true),
+                    Err(err) => {
+                        eprintln!("Error: {}", err);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Path/preset + FPS
+                let fps = parse_fps(&args[2]);
+                match handle_argument_with_fps(&config, &args[1], fps) {
+                    Ok((source, _)) => (source, fps, false),
+                    Err(err) => {
+                        eprintln!("Error: {}", err);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        4 => {
+            // Three arguments - path/preset + fps + compression, or similar combinations
+            let mut path_arg = None;
+            let mut fps_arg = None;
+            let mut use_compression = false;
+
+            for arg in &args[1..] {
+                if arg == "--compress" || arg == "-c" {
+                    use_compression = true;
+                } else if let Ok(fps_val) = arg.parse::<u64>() {
+                    fps_arg = Some(fps_val);
+                } else {
+                    path_arg = Some(arg.as_str());
+                }
+            }
+
+            if let Some(path) = path_arg {
+                let fps = fps_arg.unwrap_or(30);
+                match handle_argument_with_fps(&config, path, fps) {
+                    Ok((source, _)) => (source, fps, use_compression),
+                    Err(err) => {
+                        eprintln!("Error: {}", err);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                print_usage(&args[0], &config);
+                std::process::exit(1);
             }
         }
         _ => {
@@ -61,7 +126,14 @@ fn main() -> Result<()> {
     };
 
     let frame_interval = create_frame_interval(fps);
-    let mut app = OverlayApplication::new(media_source, frame_interval);
+
+    if use_compression {
+        log::info!("Starting application with delta compression enabled");
+    } else {
+        log::info!("Starting application with standard (uncompressed) mode");
+    }
+
+    let mut app = OverlayApplication::new(media_source, frame_interval, use_compression);
     app.run()?;
 
     Ok(())
@@ -233,17 +305,30 @@ fn create_frame_interval(fps: u64) -> Duration {
 }
 
 fn print_usage(program_name: &str, config: &Option<Config>) {
-    eprintln!("Usage: {} [path|preset] [fps]", program_name);
+    eprintln!(
+        "Usage: {} [--compress|-c] [path|preset] [fps]",
+        program_name
+    );
+    eprintln!("  --compress, -c: Enable delta compression for memory efficiency");
     eprintln!("  path: Directory with images, GIF file, or APNG file");
     eprintln!("  preset: Named preset from config file");
     eprintln!("  fps: Frames per second (default: 30, or from preset)");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  {program_name} ./frames         # Use frames directory");
-    eprintln!("  {program_name} animation.gif    # Use GIF file");
-    eprintln!("  {program_name} konata           # Use 'konata' preset");
-    eprintln!("  {program_name} 1                # Use preset '1'");
-    eprintln!("  {program_name} ./frames 60      # Use frames directory at 60 FPS");
+    eprintln!("  {program_name} ./frames              # Use frames directory");
+    eprintln!("  {program_name} --compress ./frames   # Use frames directory with compression");
+    eprintln!("  {program_name} animation.gif         # Use GIF file");
+    eprintln!("  {program_name} -c animation.gif      # Use GIF file with compression");
+    eprintln!("  {program_name} konata                # Use 'konata' preset");
+    eprintln!("  {program_name} --compress konata     # Use 'konata' preset with compression");
+    eprintln!("  {program_name} ./frames 60           # Use frames directory at 60 FPS");
+    eprintln!(
+        "  {program_name} -c ./frames 60        # Use frames directory at 60 FPS with compression"
+    );
+    eprintln!();
+    eprintln!("Controls:");
+    eprintln!("  C: Display compression info");
+    eprintln!("  Space: Pause/resume animation");
     eprintln!();
 
     if let Some(config) = config {
@@ -272,4 +357,10 @@ fn print_usage(program_name: &str, config: &Option<Config>) {
     eprintln!("[1]");
     eprintln!("path = \"/path/to/animation1.gif\"");
     eprintln!("fps = 60");
+    eprintln!();
+    eprintln!("Delta Compression:");
+    eprintln!("Delta compression reduces memory usage by storing only the differences");
+    eprintln!("between consecutive frames. This is especially effective for animations");
+    eprintln!("with small changes between frames, potentially reducing memory usage");
+    eprintln!("by 50-90% depending on the content.");
 }
