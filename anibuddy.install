@@ -1,0 +1,37 @@
+#!/bin/bash
+# Arch Linux install script for anibuddy package
+
+post_install() {
+    echo "==> anibuddy has been installed!"
+    echo ""
+    echo "    This is a Wayland-only application for displaying animated overlays."
+    echo ""
+    echo "==> Next steps:"
+    echo "    1. Ensure you have Vulkan drivers installed for your GPU:"
+    echo "       - Intel:  pacman -S vulkan-intel" 
+    echo "       - AMD:    pacman -S vulkan-radeon"
+    echo "       - NVIDIA: pacman -S nvidia-utils"
+    echo ""
+    echo "    2. Create your config file at ~/.config/anibuddy/config.toml"
+    echo "       See example: /usr/share/doc/anibuddy/config.toml.example"
+    echo ""
+    echo "    3. Test with: anibuddy --list-presets"
+    echo ""
+    echo "==> Usage examples:"
+    echo "    anibuddy ./images           # Use directory of images"
+    echo "    anibuddy animation.gif      # Use GIF file"
+    echo "    anibuddy --compress ./imgs  # Use delta compression"
+    echo "    anibuddy preset_name        # Use named preset"
+    echo ""
+}
+
+post_upgrade() {
+    echo "==> anibuddy has been upgraded!"
+    echo "    Check /usr/share/doc/anibuddy/ for updated examples."
+}
+
+pre_remove() {
+    echo "==> Removing anibuddy..."
+    echo "    Your config files in ~/.config/anibuddy/ will be preserved."
+}
+

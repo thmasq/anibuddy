@@ -1,0 +1,30 @@
+# Example configuration for anibuddy
+# Place this file at ~/.config/anibuddy/config.toml
+
+# Default preset (used when no arguments are provided)
+[default]
+path = "/path/to/your/default/animation"  # Can be directory, GIF, or APNG
+fps = 30
+
+# Named presets - use these with: anibuddy preset_name
+[konata]
+path = "/path/to/konata/frames"
+fps = 24
+
+[dancing]
+path = "/path/to/dancing.gif"
+fps = 60
+
+[slideshow]
+path = "/path/to/images/directory"
+fps = 2
+
+# You can use numbers as preset names too
+[1]
+path = "/path/to/animation1.gif"
+fps = 30
+
+[2] 
+path = "/path/to/animation2.apng"
+fps = 25
+

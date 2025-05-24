@@ -1,6 +1,4 @@
 use anyhow::Result;
-use include_dir::Dir;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -8,53 +6,55 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::image_loader::ImageSequence;
+use crate::media_loader::{MediaSequence, MediaSource};
 use crate::renderer::Renderer;
 
-pub struct OverlayApplication<'a> {
+pub struct OverlayApplication {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    image_sequence: Option<ImageSequence>,
-    image_directory: Option<PathBuf>,
-    embedded_dir: Option<&'a Dir<'a>>,
+    media_sequence: Option<MediaSequence>,
+    media_source: Option<MediaSource>,
     last_frame_time: Instant,
     frame_interval: Duration,
     current_frame_index: usize,
     frame_count: usize,
+    use_compression: bool,
+    frame_update_in_progress: bool,
+    is_shutting_down: bool,
 }
 
-impl OverlayApplication<'static> {
-    pub fn new_embedded(dir: &'static Dir, frame_interval: Duration) -> Self {
+impl OverlayApplication {
+    pub fn new(source: MediaSource, frame_interval: Duration, use_compression: bool) -> Self {
         Self {
             window: None,
             renderer: None,
-            image_sequence: None,
-            image_directory: None,
-            embedded_dir: Some(dir),
+            media_sequence: None,
+            media_source: Some(source),
             last_frame_time: Instant::now(),
             frame_interval,
             current_frame_index: 0,
             frame_count: 0,
+            use_compression,
+            frame_update_in_progress: false,
+            is_shutting_down: false,
         }
     }
 
     pub fn run(&mut self) -> Result<()> {
         let event_loop = EventLoop::new()?;
 
-        // Load the image sequence based on which constructor was used
-        self.image_sequence = if let Some(dir) = self.image_directory.as_ref() {
-            Some(ImageSequence::load(dir)?)
-        } else if let Some(dir) = self.embedded_dir {
-            Some(ImageSequence::load_embedded(&dir)?)
+        // Load the media sequence
+        if let Some(source) = self.media_source.take() {
+            self.media_sequence = Some(MediaSequence::load(source)?);
         } else {
-            return Err(anyhow::format_err!("No image source specified"));
+            return Err(anyhow::format_err!("No media source specified"));
         };
 
-        if let Some(sequence) = &self.image_sequence {
+        if let Some(sequence) = &self.media_sequence {
             self.frame_count = sequence.count();
-            log::info!("Loaded {} images in sequence", self.frame_count);
+            log::info!("Loaded {} frames in sequence", self.frame_count);
         } else {
-            log::error!("Failed to load image sequence");
+            log::error!("Failed to load media sequence");
             return Ok(());
         }
 
@@ -63,22 +63,86 @@ impl OverlayApplication<'static> {
         Ok(())
     }
 
+    /// Cleanup resources before shutdown
+    fn cleanup(&mut self) {
+        if self.is_shutting_down {
+            return;
+        }
+
+        log::info!("Starting application cleanup");
+        self.is_shutting_down = true;
+
+        if let Some(mut renderer) = self.renderer.take() {
+            renderer.cleanup();
+        }
+
+        self.media_sequence = None;
+        self.window = None;
+
+        log::info!("Application cleanup complete");
+    }
+
     fn update(&mut self) {
+        if self.is_shutting_down {
+            return;
+        }
+
         let now = Instant::now();
-        if now.duration_since(self.last_frame_time) >= self.frame_interval {
+        if now.duration_since(self.last_frame_time) >= self.frame_interval
+            && !self.frame_update_in_progress
+        {
             self.last_frame_time = now;
 
             if self.frame_count > 0 {
-                self.current_frame_index = (self.current_frame_index + 1) % self.frame_count;
+                let new_frame_index = (self.current_frame_index + 1) % self.frame_count;
 
                 if let Some(renderer) = &mut self.renderer {
-                    renderer.set_current_texture_index(self.current_frame_index);
+                    self.frame_update_in_progress = true;
+
+                    // For compressed sequences, we need to handle async frame reconstruction
+                    if self.use_compression {
+                        // Create a future to update the frame
+                        let renderer_ptr = renderer as *mut Renderer;
+                        let frame_index = new_frame_index;
+
+                        // This could probably be done better
+                        // For now, we'll use pollster to block on the async operation
+                        match pollster::block_on(async {
+                            let renderer = unsafe { &mut *renderer_ptr };
+                            renderer.set_current_texture_index(frame_index).await
+                        }) {
+                            Ok(_) => {
+                                self.current_frame_index = new_frame_index;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to update compressed frame: {}", e);
+                            }
+                        }
+                    } else {
+                        // For uncompressed sequences, this is synchronous
+                        match pollster::block_on(
+                            renderer.set_current_texture_index(new_frame_index),
+                        ) {
+                            Ok(_) => {
+                                self.current_frame_index = new_frame_index;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to update frame: {}", e);
+                            }
+                        }
+                    }
+
+                    self.frame_update_in_progress = false;
                 }
             }
         }
     }
 
     fn render(&mut self) -> Result<()> {
+        if self.is_shutting_down {
+            return Ok(());
+        }
+
         if let Some(renderer) = &mut self.renderer {
             renderer.render()?;
         }
@@ -87,9 +151,9 @@ impl OverlayApplication<'static> {
     }
 }
 
-impl ApplicationHandler for OverlayApplication<'static> {
+impl ApplicationHandler for OverlayApplication {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let (width, height) = if let Some(sequence) = &self.image_sequence {
+        let (width, height) = if let Some(sequence) = &self.media_sequence {
             if let Some(image) = sequence.current_image() {
                 let dimensions = image.dimensions();
                 log::info!(
@@ -103,12 +167,16 @@ impl ApplicationHandler for OverlayApplication<'static> {
                 (800, 600)
             }
         } else {
-            log::info!("No image sequence found, using default dimensions");
+            log::info!("No media sequence found, using default dimensions");
             (800, 600)
         };
 
         let window_attributes = WindowAttributes::default()
-            .with_title("PNG Overlay")
+            .with_title(if self.use_compression {
+                "PNG Overlay (Delta Compressed)"
+            } else {
+                "PNG Overlay"
+            })
             .with_transparent(true)
             .with_decorations(false)
             .with_resizable(false)
@@ -122,12 +190,33 @@ impl ApplicationHandler for OverlayApplication<'static> {
                 pollster::block_on(async {
                     match Renderer::new(window_arc).await {
                         Ok(mut renderer) => {
-                            if let Some(sequence) = &self.image_sequence {
+                            if let Some(sequence) = &self.media_sequence {
                                 let all_images = sequence.get_all_images();
 
-                                renderer.preload_images(&all_images);
-
-                                log::info!("Preloaded {} images to GPU memory", all_images.len());
+                                if self.use_compression {
+                                    log::info!(
+                                        "Loading {} images with delta compression",
+                                        all_images.len()
+                                    );
+                                    match renderer.preload_images_compressed(&all_images).await {
+                                        Ok(_) => {
+                                            log::info!("Successfully loaded compressed sequence");
+                                        }
+                                        Err(e) => {
+                                            log::error!(
+                                                "Failed to load compressed sequence: {}, falling back to uncompressed",
+                                                e
+                                            );
+                                            renderer.preload_images(&all_images);
+                                        }
+                                    }
+                                } else {
+                                    log::info!(
+                                        "Loading {} images without compression",
+                                        all_images.len()
+                                    );
+                                    renderer.preload_images(&all_images);
+                                }
                             }
 
                             self.renderer = Some(renderer);
@@ -155,6 +244,9 @@ impl ApplicationHandler for OverlayApplication<'static> {
         match event {
             winit::event::WindowEvent::CloseRequested => {
                 log::info!("Window close requested");
+
+                self.cleanup();
+
                 event_loop.exit();
             }
             winit::event::WindowEvent::Resized(size) => {
@@ -164,14 +256,16 @@ impl ApplicationHandler for OverlayApplication<'static> {
                 }
             }
             winit::event::WindowEvent::RedrawRequested => {
-                self.update();
+                if !self.is_shutting_down {
+                    self.update();
 
-                if let Err(err) = self.render() {
-                    log::error!("Render error: {}", err);
-                }
+                    if let Err(err) = self.render() {
+                        log::error!("Render error: {}", err);
+                    }
 
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             _ => {}
@@ -179,6 +273,10 @@ impl ApplicationHandler for OverlayApplication<'static> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.is_shutting_down {
+            return;
+        }
+
         let now = Instant::now();
         if now.duration_since(self.last_frame_time) >= self.frame_interval {
             if let Some(window) = &self.window {
@@ -186,5 +284,12 @@ impl ApplicationHandler for OverlayApplication<'static> {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
             }
         }
+    }
+}
+
+impl Drop for OverlayApplication {
+    fn drop(&mut self) {
+        log::debug!("Dropping OverlayApplication");
+        self.cleanup();
     }
 }
