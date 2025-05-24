@@ -1,6 +1,6 @@
 # Maintainer: Thomas Q <thomasqsa@gmail.com>
 pkgname=anibuddy
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="An overlay for animated gifs and apngs for the wayland desktop"
 arch=('x86_64')

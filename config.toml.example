@@ -5,15 +5,18 @@
 [default]
 path = "/path/to/your/default/animation"  # Can be directory, GIF, or APNG
 fps = 30
+compress = false  # Enable delta compression for memory efficiency
 
 # Named presets - use these with: anibuddy preset_name
 [konata]
 path = "/path/to/konata/frames"
 fps = 24
+compress = true  # Good for sequences with small frame-to-frame changes
 
 [dancing]
 path = "/path/to/dancing.gif"
 fps = 60
+# compress field is optional - defaults to false if not specified
 
 [slideshow]
 path = "/path/to/images/directory"

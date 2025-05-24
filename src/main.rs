@@ -5,7 +5,7 @@ mod overlay;
 mod renderer;
 
 use anyhow::{Result, anyhow};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use config::{Config, PresetConfig, is_likely_path};
 use env_logger::Env;
 use media_loader::{MediaSource, detect_media_type};
@@ -33,7 +33,7 @@ struct Args {
     #[arg(short, long)]
     fps: Option<u64>,
 
-    /// Enable delta compression for memory efficiency
+    /// Enable delta compression for memory efficiency (overrides preset compression if specified)
     #[arg(short, long)]
     compress: bool,
 
@@ -57,19 +57,48 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Determine media source and fps
-    let (media_source, fps) = match args.path_or_preset {
-        Some(path_or_preset) => resolve_path_or_preset(&config, &path_or_preset, args.fps)?,
+    // Determine media source, fps, and compression
+    let (media_source, fps, use_compression) = match args.path_or_preset {
+        Some(path_or_preset) => {
+            let (source, config_fps, config_compress) =
+                resolve_path_or_preset(&config, &path_or_preset, args.fps)?;
+            let final_fps = args.fps.unwrap_or(config_fps);
+            let final_compress = if args.compress { true } else { config_compress };
+            (source, final_fps, final_compress)
+        }
         None => {
             // No path/preset specified, try to use default preset
             match get_default_preset(&config, args.fps) {
-                Ok((source, fps)) => (source, fps),
+                Ok((source, config_fps, config_compress)) => {
+                    let final_fps = args.fps.unwrap_or(config_fps);
+                    let final_compress = if args.compress { true } else { config_compress };
+                    (source, final_fps, final_compress)
+                }
                 Err(_) => {
                     eprintln!(
                         "Error: No path or preset specified and no default preset configured."
                     );
                     eprintln!();
-                    print_usage_hint(&config);
+
+                    // Print the clap help message
+                    Args::command().print_help().unwrap();
+                    eprintln!(); // Add extra newline after help
+
+                    // Optionally still show config-specific hints
+                    if let Some(config) = &config {
+                        let presets = config.list_presets();
+                        if !presets.is_empty() {
+                            eprintln!("Available presets: {}", presets.join(", "));
+                            eprintln!("Use --list-presets to see preset details.");
+                        } else {
+                            eprintln!("No presets configured in config file.");
+                        }
+                    } else {
+                        eprintln!(
+                            "No config file found. Create ~/.config/anibuddy/config.toml to use presets."
+                        );
+                    }
+
                     std::process::exit(1);
                 }
             }
@@ -78,53 +107,62 @@ fn main() -> Result<()> {
 
     let frame_interval = create_frame_interval(fps);
 
-    if args.compress {
+    if use_compression {
         log::info!("Starting application with delta compression enabled");
     } else {
         log::info!("Starting application with standard (uncompressed) mode");
     }
 
-    let mut app = OverlayApplication::new(media_source, frame_interval, args.compress);
+    let mut app = OverlayApplication::new(media_source, frame_interval, use_compression);
     app.run()?;
 
     Ok(())
 }
 
-/// Resolve a path or preset name to a MediaSource and FPS
+/// Resolve a path or preset name to a MediaSource, FPS, and compression setting
 fn resolve_path_or_preset(
     config: &Option<Config>,
     path_or_preset: &str,
     fps_override: Option<u64>,
-) -> Result<(MediaSource, u64)> {
+) -> Result<(MediaSource, u64, bool)> {
     if is_likely_path(path_or_preset) {
         // Treat as path
         let media_source = create_media_source_from_path(path_or_preset)?;
         let fps = fps_override.unwrap_or(30);
-        log::info!("Using path: {} (fps: {})", path_or_preset, fps);
-        Ok((media_source, fps))
+        let compress = false; // Default to no compression for direct paths
+        log::info!(
+            "Using path: {} (fps: {}, compress: {})",
+            path_or_preset,
+            fps,
+            compress
+        );
+        Ok((media_source, fps, compress))
     } else if let Some(cfg) = config {
         // Try as preset first
         if let Some(preset) = cfg.get_preset(path_or_preset) {
             let media_source = create_media_source_from_preset(preset)?;
             let fps = fps_override.unwrap_or(preset.fps.unwrap_or(30));
+            let compress = preset.use_compression();
 
             if fps_override.is_some() {
                 log::info!(
-                    "Using preset '{}': {} (fps: {} - overridden)",
+                    "Using preset '{}': {} (fps: {} - overridden, compress: {})",
                     path_or_preset,
                     preset.path,
-                    fps
+                    fps,
+                    compress
                 );
             } else {
                 log::info!(
-                    "Using preset '{}': {} (fps: {})",
+                    "Using preset '{}': {} (fps: {}, compress: {})",
                     path_or_preset,
                     preset.path,
-                    fps
+                    fps,
+                    compress
                 );
             }
 
-            Ok((media_source, fps))
+            Ok((media_source, fps, compress))
         } else {
             // Not a preset, try as path
             try_path_fallback(cfg, path_or_preset, fps_override)
@@ -133,8 +171,14 @@ fn resolve_path_or_preset(
         // No config file, treat as path
         let media_source = create_media_source_from_path(path_or_preset)?;
         let fps = fps_override.unwrap_or(30);
-        log::info!("Using path: {} (fps: {})", path_or_preset, fps);
-        Ok((media_source, fps))
+        let compress = false; // Default to no compression when no config
+        log::info!(
+            "Using path: {} (fps: {}, compress: {})",
+            path_or_preset,
+            fps,
+            compress
+        );
+        Ok((media_source, fps, compress))
     }
 }
 
@@ -142,27 +186,30 @@ fn resolve_path_or_preset(
 fn get_default_preset(
     config: &Option<Config>,
     fps_override: Option<u64>,
-) -> Result<(MediaSource, u64)> {
+) -> Result<(MediaSource, u64, bool)> {
     if let Some(cfg) = config {
         if let Some(default_preset) = cfg.get_default() {
             let media_source = create_media_source_from_preset(default_preset)?;
             let fps = fps_override.unwrap_or(default_preset.fps.unwrap_or(30));
+            let compress = default_preset.use_compression();
 
             if fps_override.is_some() {
                 log::info!(
-                    "Using default preset: {} (fps: {} - overridden)",
+                    "Using default preset: {} (fps: {} - overridden, compress: {})",
                     default_preset.path,
-                    fps
+                    fps,
+                    compress
                 );
             } else {
                 log::info!(
-                    "Using default preset: {} (fps: {})",
+                    "Using default preset: {} (fps: {}, compress: {})",
                     default_preset.path,
-                    fps
+                    fps,
+                    compress
                 );
             }
 
-            Ok((media_source, fps))
+            Ok((media_source, fps, compress))
         } else {
             Err(anyhow!("No default preset configured"))
         }
@@ -176,7 +223,7 @@ fn try_path_fallback(
     config: &Config,
     arg: &str,
     fps_override: Option<u64>,
-) -> Result<(MediaSource, u64)> {
+) -> Result<(MediaSource, u64, bool)> {
     let path = Path::new(arg);
     if !path.exists() {
         let available_presets = config.list_presets();
@@ -197,8 +244,9 @@ fn try_path_fallback(
 
     let media_source = detect_media_type(path)?;
     let fps = fps_override.unwrap_or(30);
-    log::info!("Using path: {} (fps: {})", arg, fps);
-    Ok((media_source, fps))
+    let compress = false; // Default to no compression for fallback paths
+    log::info!("Using path: {} (fps: {}, compress: {})", arg, fps, compress);
+    Ok((media_source, fps, compress))
 }
 
 /// Create a MediaSource from a preset configuration
@@ -240,10 +288,11 @@ fn print_presets(config: &Option<Config>) {
             for preset_name in presets {
                 if let Some(preset) = cfg.get_preset(&preset_name) {
                     println!(
-                        "  {} -> {} (fps: {})",
+                        "  {} -> {} (fps: {}, compress: {})",
                         preset_name,
                         preset.path,
-                        preset.fps.unwrap_or(30)
+                        preset.fps.unwrap_or(30),
+                        preset.use_compression()
                     );
                 }
             }
@@ -264,7 +313,9 @@ fn print_usage_hint(config: &Option<Config>) {
     println!("  anibuddy animation.gif         # Use GIF file");
     println!("  anibuddy -c animation.gif      # Use GIF file with compression");
     println!("  anibuddy konata                # Use 'konata' preset");
-    println!("  anibuddy --compress konata     # Use 'konata' preset with compression");
+    println!(
+        "  anibuddy --compress konata     # Use 'konata' preset with compression (overrides config)"
+    );
     println!("  anibuddy ./frames --fps 60     # Use frames directory at 60 FPS");
     println!("  anibuddy -c ./frames --fps 60  # Use frames directory at 60 FPS with compression");
     println!();
@@ -288,18 +339,23 @@ fn print_usage_hint(config: &Option<Config>) {
     println!("[default]");
     println!("path = \"/path/to/default/animation\"");
     println!("fps = 30");
+    println!("compress = false");
     println!();
     println!("[konata]");
     println!("path = \"/path/to/konata/frames\"");
     println!("fps = 24");
+    println!("compress = true");
     println!();
     println!("[1]");
     println!("path = \"/path/to/animation1.gif\"");
     println!("fps = 60");
+    println!("compress = false");
     println!();
     println!("Delta Compression:");
     println!("Delta compression reduces memory usage by storing only the differences");
     println!("between consecutive frames. This is especially effective for animations");
     println!("with small changes between frames, potentially reducing memory usage");
     println!("by 50-90% depending on the content.");
+    println!();
+    println!("The --compress CLI flag overrides the preset's compression setting.");
 }

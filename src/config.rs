@@ -8,6 +8,13 @@ use std::path::PathBuf;
 pub struct PresetConfig {
     pub path: String,
     pub fps: Option<u64>,
+    pub compress: Option<bool>,
+}
+
+impl PresetConfig {
+    pub fn use_compression(&self) -> bool {
+        self.compress.unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,5 +117,29 @@ mod tests {
         assert!(!is_likely_path("1"));
         assert!(!is_likely_path("dancer"));
         assert!(!is_likely_path("default"));
+    }
+
+    #[test]
+    fn test_compression_default() {
+        let preset_with_compress = PresetConfig {
+            path: "/test".to_string(),
+            fps: Some(30),
+            compress: Some(true),
+        };
+        assert!(preset_with_compress.use_compression());
+
+        let preset_without_compress = PresetConfig {
+            path: "/test".to_string(),
+            fps: Some(30),
+            compress: None,
+        };
+        assert!(!preset_without_compress.use_compression());
+
+        let preset_with_false_compress = PresetConfig {
+            path: "/test".to_string(),
+            fps: Some(30),
+            compress: Some(false),
+        };
+        assert!(!preset_with_false_compress.use_compression());
     }
 }
