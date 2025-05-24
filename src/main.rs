@@ -14,17 +14,16 @@ use std::path::Path;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "konata-dance-rs")]
-#[command(about = "A dancing overlay application with delta compression support")]
+#[command(name = "anibuddy")]
+#[command(about = "An overlay for animated gifs and apngs for the wayland desktop")]
 #[command(
-    long_about = r#"A dancing overlay application that can display animated sequences from:
+    long_about = r#"An overlay application that can display animated sequences from:
 - Directories containing image files (PNG, JPG, JPEG)
 - GIF files
 - APNG files
 - Named presets from config file
 
-Supports delta compression to reduce memory usage by 50-90% for animations 
-with small changes between frames."#
+Supports delta compression to reduce memory usage for animations with small changes between frames."#
 )]
 struct Args {
     /// Path to directory with images, GIF file, APNG file, or preset name
@@ -253,23 +252,21 @@ fn print_presets(config: &Option<Config>) {
         }
     } else {
         println!("No config file found.");
-        println!("Create ~/.config/konata-dance/config.toml to configure presets.");
+        println!("Create ~/.config/anibuddy/config.toml to configure presets.");
     }
 }
 
 /// Print usage hints and examples
 fn print_usage_hint(config: &Option<Config>) {
     println!("Examples:");
-    println!("  konata-dance-rs ./frames              # Use frames directory");
-    println!("  konata-dance-rs --compress ./frames   # Use frames directory with compression");
-    println!("  konata-dance-rs animation.gif         # Use GIF file");
-    println!("  konata-dance-rs -c animation.gif      # Use GIF file with compression");
-    println!("  konata-dance-rs konata                # Use 'konata' preset");
-    println!("  konata-dance-rs --compress konata     # Use 'konata' preset with compression");
-    println!("  konata-dance-rs ./frames --fps 60     # Use frames directory at 60 FPS");
-    println!(
-        "  konata-dance-rs -c ./frames --fps 60  # Use frames directory at 60 FPS with compression"
-    );
+    println!("  anibuddy ./frames              # Use frames directory");
+    println!("  anibuddy --compress ./frames   # Use frames directory with compression");
+    println!("  anibuddy animation.gif         # Use GIF file");
+    println!("  anibuddy -c animation.gif      # Use GIF file with compression");
+    println!("  anibuddy konata                # Use 'konata' preset");
+    println!("  anibuddy --compress konata     # Use 'konata' preset with compression");
+    println!("  anibuddy ./frames --fps 60     # Use frames directory at 60 FPS");
+    println!("  anibuddy -c ./frames --fps 60  # Use frames directory at 60 FPS with compression");
     println!();
     println!("Controls:");
     println!();
@@ -283,11 +280,11 @@ fn print_usage_hint(config: &Option<Config>) {
             println!("No presets configured.");
         }
     } else {
-        println!("No config file found. Create ~/.config/konata-dance/config.toml to use presets.");
+        println!("No config file found. Create ~/.config/anibuddy/config.toml to use presets.");
     }
 
     println!();
-    println!("Config file format (~/.config/konata-dance/config.toml):");
+    println!("Config file format (~/.config/anibuddy/config.toml):");
     println!("[default]");
     println!("path = \"/path/to/default/animation\"");
     println!("fps = 30");

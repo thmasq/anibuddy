@@ -74,7 +74,7 @@ fn get_config_path() -> Result<PathBuf> {
 
     Ok(home_dir
         .join(".config")
-        .join("konata-dance")
+        .join("anibuddy")
         .join("config.toml"))
 }
 
