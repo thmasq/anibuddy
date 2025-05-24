@@ -8,7 +8,7 @@ var current_frame: texture_2d<f32>;
 @group(0) @binding(1)
 var previous_frame: texture_2d<f32>;
 @group(0) @binding(2)
-var delta_output: texture_storage_2d<rgba8sint, write>;
+var delta_output: texture_storage_2d<rgba16sint, write>;
 
 @compute @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -25,12 +25,12 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Calculate delta as signed difference
     let delta = current_pixel - previous_pixel;
     
-    // Convert to signed integer format [-127, 127] range
+    // Convert to signed 16-bit integer format [-32767, 32767] range for much higher precision
     let delta_int = vec4<i32>(
-        i32(clamp(delta.r * 127.0, -127.0, 127.0)),
-        i32(clamp(delta.g * 127.0, -127.0, 127.0)),
-        i32(clamp(delta.b * 127.0, -127.0, 127.0)),
-        i32(clamp(delta.a * 127.0, -127.0, 127.0))
+        i32(clamp(delta.r * 32767.0, -32767.0, 32767.0)),
+        i32(clamp(delta.g * 32767.0, -32767.0, 32767.0)),
+        i32(clamp(delta.b * 32767.0, -32767.0, 32767.0)),
+        i32(clamp(delta.a * 32767.0, -32767.0, 32767.0))
     );
     
     textureStore(delta_output, coords, delta_int);
@@ -57,12 +57,12 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let base_pixel = textureLoad(base_frame, coords, 0);
     let delta_pixel = textureLoad(delta_frame, coords, 0);
     
-    // Convert delta back to float and apply to base
+    // Convert delta back to float with higher precision
     let delta_float = vec4<f32>(
-        f32(delta_pixel.r) / 127.0,
-        f32(delta_pixel.g) / 127.0,
-        f32(delta_pixel.b) / 127.0,
-        f32(delta_pixel.a) / 127.0
+        f32(delta_pixel.r) / 32767.0,
+        f32(delta_pixel.g) / 32767.0,
+        f32(delta_pixel.b) / 32767.0,
+        f32(delta_pixel.a) / 32767.0
     );
     
     let reconstructed = clamp(base_pixel + delta_float, vec4<f32>(0.0), vec4<f32>(1.0));
@@ -71,7 +71,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 "#;
 
 pub struct DeltaFrame {
-    pub data: Vec<i8>,
+    pub data: Vec<i16>,
     pub width: u32,
     pub height: u32,
 }
@@ -143,7 +143,7 @@ impl DeltaCompressor {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access: wgpu::StorageTextureAccess::WriteOnly,
-                            format: wgpu::TextureFormat::Rgba8Sint,
+                            format: wgpu::TextureFormat::Rgba16Sint,
                             view_dimension: wgpu::TextureViewDimension::D2,
                         },
                         count: None,
@@ -295,7 +295,7 @@ impl DeltaCompressor {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Sint,
+                    format: wgpu::TextureFormat::Rgba16Sint,
                     usage: wgpu::TextureUsages::STORAGE_BINDING
                         | wgpu::TextureUsages::TEXTURE_BINDING
                         | wgpu::TextureUsages::COPY_SRC
@@ -320,8 +320,8 @@ impl DeltaCompressor {
                     view_formats: &[],
                 }));
 
-            // Calculate aligned buffer size for staging buffer
-            let unpadded_bytes_per_row = width * 4; // 4 bytes per pixel for RGBA8Sint
+            // Calculate aligned buffer size for staging buffer (16-bit data now)
+            let unpadded_bytes_per_row = width * 8; // 8 bytes per pixel for Rgba16Sint (4 channels * 2 bytes each)
             let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
             let padded_bytes_per_row = ((unpadded_bytes_per_row + align - 1) / align) * align;
             let buffer_size = (padded_bytes_per_row * height) as u64;
@@ -338,7 +338,7 @@ impl DeltaCompressor {
     }
 
     fn calculate_aligned_bytes_per_row(width: u32) -> u32 {
-        let unpadded_bytes_per_row = width * 4; // 4 bytes per pixel for RGBA
+        let unpadded_bytes_per_row = width * 8; // 8 bytes per pixel for Rgba16Sint
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         ((unpadded_bytes_per_row + align - 1) / align) * align
     }
@@ -446,7 +446,7 @@ impl DeltaCompressor {
     }
 
     fn upload_delta_to_texture(&self, delta: &DeltaFrame) -> Result<()> {
-        let unpadded_bytes_per_row = 4 * delta.width;
+        let unpadded_bytes_per_row = 8 * delta.width;
 
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -606,13 +606,13 @@ impl DeltaCompressor {
 
         // Extract the actual image data, removing padding
         let mut delta_data = Vec::new();
-        let unpadded_bytes_per_row = width * 4;
+        let unpadded_bytes_per_row = width * 8;
 
         for row in 0..height {
             let row_start = (row * padded_bytes_per_row) as usize;
             let row_end = row_start + unpadded_bytes_per_row as usize;
             let row_data = &data[row_start..row_end];
-            delta_data.extend_from_slice(bytemuck::cast_slice::<u8, i8>(row_data));
+            delta_data.extend_from_slice(bytemuck::cast_slice::<u8, i16>(row_data));
         }
 
         drop(data);
@@ -692,7 +692,7 @@ impl DeltaCompressor {
     }
 
     async fn read_reconstructed_frame(&self, width: u32, height: u32) -> Result<RgbaImage> {
-        let padded_bytes_per_row = Self::calculate_aligned_bytes_per_row(width);
+        let padded_bytes_per_row = Self::calculate_aligned_bytes_per_row_rgba8(width);
         let buffer_size = (padded_bytes_per_row * height) as u64;
 
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -765,12 +765,18 @@ impl DeltaCompressor {
         RgbaImage::from_raw(width, height, image_data)
             .ok_or_else(|| anyhow::anyhow!("Failed to create image from reconstructed data"))
     }
+
+    fn calculate_aligned_bytes_per_row_rgba8(width: u32) -> u32 {
+        let unpadded_bytes_per_row = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        ((unpadded_bytes_per_row + align - 1) / align) * align
+    }
 }
 
 impl CompressedSequence {
     pub fn memory_usage(&self) -> usize {
         let base_size = self.base_frame.as_raw().len();
-        let deltas_size: usize = self.deltas.iter().map(|d| d.data.len()).sum();
+        let deltas_size: usize = self.deltas.iter().map(|d| d.data.len() * 2).sum();
         base_size + deltas_size
     }
 
