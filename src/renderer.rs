@@ -74,7 +74,7 @@ pub enum SequenceType {
 pub struct Renderer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    surface: wgpu::Surface<'static>,
+    surface: Option<wgpu::Surface<'static>>,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sequence_type: Option<SequenceType>,
@@ -271,7 +271,7 @@ impl Renderer {
         Ok(Self {
             device: device_arc,
             queue: queue_arc,
-            surface,
+            surface: Some(surface), // Wrap in Option
             pipeline,
             bind_group_layout,
             sequence_type: None,
@@ -284,6 +284,25 @@ impl Renderer {
         })
     }
 
+    /// Properly cleanup the renderer resources
+    pub fn cleanup(&mut self) {
+        log::info!("Cleaning up renderer resources");
+
+        // Clear sequence type which contains GPU resources
+        self.sequence_type = None;
+
+        // Clear delta compressor
+        self.delta_compressor = None;
+
+        // Drop the surface before the window is destroyed
+        if let Some(surface) = self.surface.take() {
+            drop(surface);
+            log::debug!("Surface dropped");
+        }
+
+        log::info!("Renderer cleanup complete");
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -291,7 +310,10 @@ impl Renderer {
 
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+
+        if let Some(ref surface) = self.surface {
+            surface.configure(&self.device, &self.config);
+        }
 
         // Update dimensions
         self.current_dimensions.window_width = width as f32;
@@ -601,7 +623,15 @@ impl Renderer {
     }
 
     pub fn render(&mut self) -> Result<()> {
-        let frame = self.surface.get_current_texture()?;
+        let surface = match &self.surface {
+            Some(surface) => surface,
+            None => {
+                log::warn!("Cannot render: surface has been dropped");
+                return Ok(());
+            }
+        };
+
+        let frame = surface.get_current_texture()?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -655,5 +685,12 @@ impl Renderer {
         frame.present();
 
         Ok(())
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        log::debug!("Dropping Renderer");
+        self.cleanup();
     }
 }

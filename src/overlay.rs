@@ -20,6 +20,7 @@ pub struct OverlayApplication {
     frame_count: usize,
     use_compression: bool,
     frame_update_in_progress: bool,
+    is_shutting_down: bool,
 }
 
 impl OverlayApplication {
@@ -35,6 +36,7 @@ impl OverlayApplication {
             frame_count: 0,
             use_compression,
             frame_update_in_progress: false,
+            is_shutting_down: false,
         }
     }
 
@@ -61,7 +63,30 @@ impl OverlayApplication {
         Ok(())
     }
 
+    /// Cleanup resources before shutdown
+    fn cleanup(&mut self) {
+        if self.is_shutting_down {
+            return;
+        }
+
+        log::info!("Starting application cleanup");
+        self.is_shutting_down = true;
+
+        if let Some(mut renderer) = self.renderer.take() {
+            renderer.cleanup();
+        }
+
+        self.media_sequence = None;
+        self.window = None;
+
+        log::info!("Application cleanup complete");
+    }
+
     fn update(&mut self) {
+        if self.is_shutting_down {
+            return;
+        }
+
         let now = Instant::now();
         if now.duration_since(self.last_frame_time) >= self.frame_interval
             && !self.frame_update_in_progress
@@ -114,6 +139,10 @@ impl OverlayApplication {
     }
 
     fn render(&mut self) -> Result<()> {
+        if self.is_shutting_down {
+            return Ok(());
+        }
+
         if let Some(renderer) = &mut self.renderer {
             renderer.render()?;
         }
@@ -215,6 +244,9 @@ impl ApplicationHandler for OverlayApplication {
         match event {
             winit::event::WindowEvent::CloseRequested => {
                 log::info!("Window close requested");
+
+                self.cleanup();
+
                 event_loop.exit();
             }
             winit::event::WindowEvent::Resized(size) => {
@@ -224,14 +256,16 @@ impl ApplicationHandler for OverlayApplication {
                 }
             }
             winit::event::WindowEvent::RedrawRequested => {
-                self.update();
+                if !self.is_shutting_down {
+                    self.update();
 
-                if let Err(err) = self.render() {
-                    log::error!("Render error: {}", err);
-                }
+                    if let Err(err) = self.render() {
+                        log::error!("Render error: {}", err);
+                    }
 
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             _ => {}
@@ -239,6 +273,10 @@ impl ApplicationHandler for OverlayApplication {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.is_shutting_down {
+            return;
+        }
+
         let now = Instant::now();
         if now.duration_since(self.last_frame_time) >= self.frame_interval {
             if let Some(window) = &self.window {
@@ -246,5 +284,12 @@ impl ApplicationHandler for OverlayApplication {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
             }
         }
+    }
+}
+
+impl Drop for OverlayApplication {
+    fn drop(&mut self) {
+        log::debug!("Dropping OverlayApplication");
+        self.cleanup();
     }
 }

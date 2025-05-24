@@ -243,6 +243,23 @@ impl DeltaCompressor {
         })
     }
 
+    pub fn cleanup(&mut self) {
+        log::debug!("Cleaning up DeltaCompressor resources");
+
+        // Clear working textures
+        self.working_texture_current = None;
+        self.working_texture_previous = None;
+        self.working_texture_delta = None;
+        self.working_texture_output = None;
+
+        // Clear staging buffer
+        self.staging_buffer = None;
+
+        self.current_dimensions = (0, 0);
+
+        log::debug!("DeltaCompressor cleanup complete");
+    }
+
     fn ensure_working_textures(&mut self, width: u32, height: u32) {
         if self.current_dimensions != (width, height) {
             log::info!("Creating working textures for {}x{}", width, height);
@@ -770,6 +787,13 @@ impl DeltaCompressor {
         let unpadded_bytes_per_row = width * 4;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         ((unpadded_bytes_per_row + align - 1) / align) * align
+    }
+}
+
+impl Drop for DeltaCompressor {
+    fn drop(&mut self) {
+        log::debug!("Dropping DeltaCompressor");
+        self.cleanup();
     }
 }
 
